@@ -14,7 +14,10 @@ import mimetypes
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'dev-key-12345'
 app.config['FERNET_KEY'] = 'tV_Hw7LFaSqFfCFhv-GW8e_k3Arp2mXRMSJrEOeD3eo='
-app.config['UPLOAD_FOLDER'] = os.path.join(os.getcwd(), 'uploads')
+
+# More robust path handling for server environments
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 app.config['METADATA_FILE'] = os.path.join(app.config['UPLOAD_FOLDER'], 'metadata.json')
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
 
@@ -161,21 +164,26 @@ def view_file(doc_id):
     doc = next((d for d in metadata if d['id'] == doc_id), None)
     if not doc:
         return "File not found", 404
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc.filename)
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
     
     if not os.path.exists(file_path):
-        return "File not found", 404
+        return "File not found on disk", 404
         
-    with open(file_path, 'rb') as f:
-        encrypted_data = f.read()
-    
-    decrypted_data = fernet.decrypt(encrypted_data)
-    mime_type, _ = mimetypes.guess_type(doc['original_name'])
-    
-    return send_file(
-        io.BytesIO(decrypted_data),
-        mimetype=mime_type or 'application/octet-stream'
-    )
+    try:
+        with open(file_path, 'rb') as f:
+            encrypted_data = f.read()
+        
+        decrypted_data = fernet.decrypt(encrypted_data)
+        mime_type, _ = mimetypes.guess_type(doc['original_name'])
+        
+        return send_file(
+            io.BytesIO(decrypted_data),
+            mimetype=mime_type or 'application/octet-stream'
+        )
+    except Exception as e:
+        app.logger.error(f"Error serving file {doc_id}: {e}")
+        return f"Error opening file", 500
 
 @app.route('/download/<int:doc_id>')
 @login_required
@@ -185,21 +193,26 @@ def download(doc_id):
     doc = next((d for d in metadata if d['id'] == doc_id), None)
     if not doc:
         return "File not found", 404
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc.filename)
+    
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
     
     if not os.path.exists(file_path):
-        return "File not found", 404
+        return "File not found on disk", 404
         
-    with open(file_path, 'rb') as f:
-        encrypted_data = f.read()
-    
-    decrypted_data = fernet.decrypt(encrypted_data)
-    
-    return send_file(
-        io.BytesIO(decrypted_data),
-        as_attachment=True,
-        download_name=doc['original_name']
-    )
+    try:
+        with open(file_path, 'rb') as f:
+            encrypted_data = f.read()
+        
+        decrypted_data = fernet.decrypt(encrypted_data)
+        
+        return send_file(
+            io.BytesIO(decrypted_data),
+            as_attachment=True,
+            download_name=doc['original_name']
+        )
+    except Exception as e:
+        app.logger.error(f"Error downloading file {doc_id}: {e}")
+        return "Error downloading file", 500
 
 @app.route('/delete/<int:doc_id>', methods=['POST'])
 @login_required
