@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - Document Keeper</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <nav class="glass-nav">
+        <h2
+            style="font-weight: 600; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; color: transparent;">
+            DocKeeper</h2>
+    </nav>
+    <div class="login-box">
+        <h3 style="margin-bottom: 2rem; font-size: 1.5rem;">Join Us</h3>
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+        {% for message in messages %}
+        <div style="color: #f87171; margin-bottom: 1rem; font-size: 0.9rem;">{{ message }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+        <form action="{{ url_for('register') }}" method="POST">
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Username</label>
+                <input type="text" name="username" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Password</label>
+                <input type="password" name="password" class="form-control" required>
+            </div>
+            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Create Account</button>
+        </form>
+        <p style="margin-top: 1.5rem; color: var(--text-muted); font-size: 0.9rem;">
+            Already have an account? <a href="{{ url_for('login') }}"
+                style="color: var(--primary); text-decoration: none;">Login</a>
+        </p>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload - Document Keeper</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+
+<body>
+    <nav class="glass-nav">
+        <h2
+            style="font-weight: 600; background: linear-gradient(to right, #818cf8, #c084fc); -webkit-background-clip: text; color: transparent;">
+            DocKeeper</h2>
+        <a href="{{ url_for('dashboard') }}" style="color: var(--text-muted); text-decoration: none;"><i
+                class="fas fa-arrow-left"></i> Back to Dashboard</a>
+    </nav>
+
+    <div class="container" style="max-width: 600px;">
+        <div class="login-box" style="margin-top: 2rem; width: 100%; max-width: 100%;">
+            <h2 style="margin-bottom: 2rem;">Upload Document</h2>
+            <form action="{{ url_for('upload') }}" method="POST" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Name</label>
+                    <input type="text" name="name" class="form-control" placeholder="e.g. My Vacation Video" required>
+                </div>
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Description</label>
+                    <textarea name="description" class="form-control" rows="3"
+                        placeholder="Add some details about this file..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 0.5rem; color: var(--text-muted);">Select File</label>
+                    <input type="file" name="file" class="form-control" required style="padding: 0.6rem;">
+                    <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">Max file size: 100MB</p>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;"><i
+                        class="fas fa-cloud-upload-alt"></i> Start Upload</button>
+            </form>
+        </div>
+    </div>
+</body>
+
+</html>

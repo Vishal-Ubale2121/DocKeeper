@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+instance/
+uploads/
+db.sqlite
+.env
+key.txt
+# Ignore log files
+*.log
