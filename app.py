@@ -10,6 +10,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 from functools import wraps
 import mimetypes
+import sqlite3
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'dev-key-12345'
@@ -19,6 +20,7 @@ app.config['FERNET_KEY'] = 'tV_Hw7LFaSqFfCFhv-GW8e_k3Arp2mXRMSJrEOeD3eo='
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 app.config['METADATA_FILE'] = os.path.join(app.config['UPLOAD_FOLDER'], 'metadata.json')
+app.config['DATABASE'] = os.path.join(BASE_DIR, 'db.sqlite')
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
 
 login_manager = LoginManager()
@@ -49,18 +51,54 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def get_metadata():
-    if not os.path.exists(app.config['METADATA_FILE']):
-        return []
-    with open(app.config['METADATA_FILE'], 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
+def get_db():
+    db = sqlite3.connect(app.config['DATABASE'])
+    db.row_factory = sqlite3.Row
+    return db
 
-def save_metadata(metadata):
-    with open(app.config['METADATA_FILE'], 'w') as f:
-        json.dump(metadata, f, indent=4)
+def init_db():
+    db = get_db()
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            name TEXT,
+            description TEXT,
+            file_type TEXT,
+            upload_date TEXT,
+            user_id INTEGER
+        )
+    ''')
+    db.commit()
+    
+    # Migrate from JSON if exists
+    if os.path.exists(app.config['METADATA_FILE']):
+        print("Migrating metadata from JSON to SQLite...")
+        with open(app.config['METADATA_FILE'], 'r') as f:
+            try:
+                data = json.load(f)
+                for doc in data:
+                    # Check if already migrated
+                    exists = db.execute('SELECT id FROM documents WHERE id = ?', (doc['id'],)).fetchone()
+                    if not exists:
+                        db.execute('''
+                            INSERT INTO documents (id, filename, original_name, name, description, file_type, upload_date, user_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (doc['id'], doc['filename'], doc['original_name'], doc.get('name'), 
+                              doc.get('description'), doc.get('file_type'), doc.get('upload_date'), doc.get('user_id')))
+                db.commit()
+                # Rename old file instead of deleting to be safe
+                os.rename(app.config['METADATA_FILE'], app.config['METADATA_FILE'] + '.bak')
+            except Exception as e:
+                print(f"Migration error: {e}")
+    db.close()
+
+def get_metadata():
+    db = get_db()
+    docs = db.execute('SELECT * FROM documents').fetchall()
+    db.close()
+    return [dict(doc) for doc in docs]
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -138,20 +176,14 @@ def upload():
             else:
                 file_type = 'file'
 
-            metadata = get_metadata()
-            new_id = max([d['id'] for d in metadata]) + 1 if metadata else 1
-            new_doc = {
-                'id': new_id,
-                'filename': unique_filename,
-                'original_name': filename,
-                'name': name,
-                'description': description,
-                'file_type': file_type,
-                'upload_date': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-                'user_id': current_user.id
-            }
-            metadata.append(new_doc)
-            save_metadata(metadata)
+            db = get_db()
+            cursor = db.execute('''
+                INSERT INTO documents (filename, original_name, name, description, file_type, upload_date, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (unique_filename, filename, name, description, file_type, 
+                  datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), current_user.id))
+            db.commit()
+            db.close()
             return redirect(url_for('dashboard'))
             
     return render_template('upload.html')
@@ -160,8 +192,9 @@ def upload():
 @login_required
 @admin_required
 def view_file(doc_id):
-    metadata = get_metadata()
-    doc = next((d for d in metadata if d['id'] == doc_id), None)
+    db = get_db()
+    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
+    db.close()
     if not doc:
         return "File not found", 404
     
@@ -189,8 +222,9 @@ def view_file(doc_id):
 @login_required
 @admin_required
 def download(doc_id):
-    metadata = get_metadata()
-    doc = next((d for d in metadata if d['id'] == doc_id), None)
+    db = get_db()
+    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
+    db.close()
     if not doc:
         return "File not found", 404
     
@@ -218,20 +252,23 @@ def download(doc_id):
 @login_required
 @admin_required
 def delete(doc_id):
-    metadata = get_metadata()
-    doc = next((d for d in metadata if d['id'] == doc_id), None)
+    db = get_db()
+    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
     if not doc:
+        db.close()
         return "File not found", 404
     
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], doc['filename'])
     if os.path.exists(file_path):
         os.remove(file_path)
     
-    metadata = [d for d in metadata if d['id'] != doc_id]
-    save_metadata(metadata)
+    db.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
+    db.commit()
+    db.close()
     return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
     if not os.path.exists(app.config['UPLOAD_FOLDER']):
         os.makedirs(app.config['UPLOAD_FOLDER'])
+    init_db()
     app.run(debug=True)
