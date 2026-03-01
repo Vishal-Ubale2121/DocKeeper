@@ -28,6 +28,11 @@ login_manager.login_view = 'login'
 login_manager.init_app(app)
 
 fernet = Fernet(app.config['FERNET_KEY'])
+
+# Ensure upload folder exists and DB is initialized at module level
+# This ensures it runs on Render/Gunicorn where __name__ == "__main__" is false
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
 # --- Models (Replacing DB with simple classes and JSON) ---
 class User(UserMixin):
     def __init__(self, id, username, password):
@@ -267,8 +272,7 @@ def delete(doc_id):
     db.close()
     return redirect(url_for('dashboard'))
 
+init_db()
+
 if __name__ == '__main__':
-    if not os.path.exists(app.config['UPLOAD_FOLDER']):
-        os.makedirs(app.config['UPLOAD_FOLDER'])
-    init_db()
     app.run(debug=True)
