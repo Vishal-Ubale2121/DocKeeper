@@ -1,5 +1,6 @@
 import os
 import io
+import json
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -15,19 +16,36 @@ def get_drive_service():
     token_path = os.path.join(os.path.dirname(__file__), 'token.json')
     creds_path = os.path.join(os.path.dirname(__file__), 'credentials.json')
 
-    if os.path.exists(token_path):
+    # 1. Try loading token from environment variable
+    token_env = os.environ.get('GOOGLE_TOKEN_JSON')
+    if token_env:
+        creds = Credentials.from_authorized_user_info(json.loads(token_env), SCOPES)
+    # 2. Try loading token from file
+    elif os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not os.path.exists(creds_path):
-                raise FileNotFoundError(f"Missing {creds_path}. Please place your Google OAuth client ID credentials here.")
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-            # Use console flow since this is running on a backend
+            # 3. Handle auth flow if no valid token
+            creds_env = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+            if creds_env:
+                client_config = json.loads(creds_env)
+                flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+            else:
+                if not os.path.exists(creds_path):
+                    raise FileNotFoundError(f"Missing Google credentials in environment or {creds_path}.")
+                flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+            
+            # Note: run_local_server will fail on Render. You must generate token.json locally
+            # and put it in the GOOGLE_TOKEN_JSON environment variable.
             creds = flow.run_local_server(port=0)
-        with open(token_path, 'w') as token:
-            token.write(creds.to_json())
+
+        # Save token if we are using files (local dev)
+        if not token_env:
+            with open(token_path, 'w') as token:
+                token.write(creds.to_json())
 
     return build('drive', 'v3', credentials=creds)
 

@@ -4,25 +4,33 @@ import json
 import uuid
 from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory, Response, send_file
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from datetime import datetime
 from cryptography.fernet import Fernet
 from functools import wraps
 import mimetypes
-import sqlite3
 import drive_service
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'dev-key-12345'
-app.config['FERNET_KEY'] = 'tV_Hw7LFaSqFfCFhv-GW8e_k3Arp2mXRMSJrEOeD3eo='
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-key-12345')
+app.config['FERNET_KEY'] = os.environ.get('FERNET_KEY', 'tV_Hw7LFaSqFfCFhv-GW8e_k3Arp2mXRMSJrEOeD3eo=')
 
 # More robust path handling for server environments
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
 app.config['METADATA_FILE'] = os.path.join(app.config['UPLOAD_FOLDER'], 'metadata.json')
-app.config['DATABASE'] = os.path.join(BASE_DIR, 'db.sqlite')
+
+# Database Config (Supports Render's Postgres and Local SQLite)
+db_url = os.environ.get('DATABASE_URL', 'sqlite:///' + os.path.join(BASE_DIR, 'db.sqlite'))
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
+
+db = SQLAlchemy(app)
 
 login_manager = LoginManager()
 login_manager.login_view = 'login'
@@ -30,11 +38,11 @@ login_manager.init_app(app)
 
 fernet = Fernet(app.config['FERNET_KEY'])
 
-# Ensure upload folder exists and DB is initialized at module level
-# This ensures it runs on Render/Gunicorn where __name__ == "__main__" is false
+# Ensure upload folder exists
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
-# --- Models (Replacing DB with simple classes and JSON) ---
+
+# --- Models ---
 class User(UserMixin):
     def __init__(self, id, username, password):
         self.id = id
@@ -43,9 +51,34 @@ class User(UserMixin):
 
 # Hardcoded Admin User
 ADMIN_USERNAME = 'vish2121'
-# Actually, since it's just one user, I can just check the password directly or generate a hash.
-# Let's use a simpler approach for now and fix the hash in a moment.
 ADMIN_USER = User(id=1, username=ADMIN_USERNAME, password=generate_password_hash('53721@Docs'))
+
+class Folder(db.Model):
+    __tablename__ = 'folders'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('folders.id'))
+    drive_folder_id = db.Column(db.String)
+    user_id = db.Column(db.Integer)
+    
+    subfolders = db.relationship('Folder', backref=db.backref('parent', remote_side=[id]), cascade="all, delete-orphan")
+    documents = db.relationship('Document', backref='folder', cascade="all, delete-orphan")
+
+class Document(db.Model):
+    __tablename__ = 'documents'
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String, nullable=False)
+    original_name = db.Column(db.String, nullable=False)
+    name = db.Column(db.String)
+    description = db.Column(db.Text)
+    file_type = db.Column(db.String)
+    upload_date = db.Column(db.String)
+    user_id = db.Column(db.Integer)
+    folder_id = db.Column(db.Integer, db.ForeignKey('folders.id'))
+
+# Ensure db tables are created
+with app.app_context():
+    db.create_all()
 
 # --- Decorators ---
 def admin_required(f):
@@ -57,86 +90,23 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-def get_db():
-    db = sqlite3.connect(app.config['DATABASE'])
-    db.row_factory = sqlite3.Row
-    return db
-
-def init_db():
-    db = get_db()
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS folders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            parent_id INTEGER,
-            drive_folder_id TEXT,
-            user_id INTEGER,
-            FOREIGN KEY (parent_id) REFERENCES folders (id)
-        )
-    ''')
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            original_name TEXT NOT NULL,
-            name TEXT,
-            description TEXT,
-            file_type TEXT,
-            upload_date TEXT,
-            user_id INTEGER,
-            folder_id INTEGER,
-            FOREIGN KEY (folder_id) REFERENCES folders (id)
-        )
-    ''')
-    try:
-        db.execute('ALTER TABLE documents ADD COLUMN folder_id INTEGER REFERENCES folders(id)')
-    except sqlite3.OperationalError:
-        pass
-    db.commit()
-    
-    # Migrate from JSON if exists
-    if os.path.exists(app.config['METADATA_FILE']):
-        print("Migrating metadata from JSON to SQLite...")
-        with open(app.config['METADATA_FILE'], 'r') as f:
-            try:
-                data = json.load(f)
-                for doc in data:
-                    # Check if already migrated
-                    exists = db.execute('SELECT id FROM documents WHERE id = ?', (doc['id'],)).fetchone()
-                    if not exists:
-                        db.execute('''
-                            INSERT INTO documents (id, filename, original_name, name, description, file_type, upload_date, user_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (doc['id'], doc['filename'], doc['original_name'], doc.get('name'), 
-                              doc.get('description'), doc.get('file_type'), doc.get('upload_date'), doc.get('user_id')))
-                db.commit()
-                # Rename old file instead of deleting to be safe
-                os.rename(app.config['METADATA_FILE'], app.config['METADATA_FILE'] + '.bak')
-            except Exception as e:
-                print(f"Migration error: {e}")
-    db.close()
-
 def get_folders(folder_id=None):
-    db = get_db()
     if folder_id:
-        folders = db.execute('SELECT * FROM folders WHERE parent_id = ?', (folder_id,)).fetchall()
+        folders = Folder.query.filter_by(parent_id=folder_id).all()
     else:
-        folders = db.execute('SELECT * FROM folders WHERE parent_id IS NULL').fetchall()
-    db.close()
-    return [dict(f) for f in folders]
+        folders = Folder.query.filter_by(parent_id=None).all()
+    return [{"id": f.id, "name": f.name, "parent_id": f.parent_id, "drive_folder_id": f.drive_folder_id} for f in folders]
 
 def get_metadata(folder_id=None):
-    db = get_db()
     if folder_id:
-        docs = db.execute('SELECT * FROM documents WHERE folder_id = ?', (folder_id,)).fetchall()
+        docs = Document.query.filter_by(folder_id=folder_id).all()
     else:
-        docs = db.execute('SELECT * FROM documents WHERE folder_id IS NULL').fetchall()
-    db.close()
-    return [dict(doc) for doc in docs]
+        docs = Document.query.filter_by(folder_id=None).all()
+    return [{"id": d.id, "filename": d.filename, "original_name": d.original_name, "name": d.name, "description": d.description, "file_type": d.file_type, "upload_date": d.upload_date, "folder_id": d.folder_id} for d in docs]
 
 @login_manager.user_loader
 def load_user(user_id):
-    if user_id == '1':
+    if str(user_id) == '1':
         return ADMIN_USER
     return None
 
@@ -182,17 +152,15 @@ def dashboard(folder_id=None):
     
     # Generate breadcrumbs
     breadcrumbs = []
-    db = get_db()
     curr_id = folder_id
     while curr_id:
-        f = db.execute('SELECT id, name, parent_id FROM folders WHERE id = ?', (curr_id,)).fetchone()
+        f = Folder.query.get(curr_id)
         if f:
-            breadcrumbs.insert(0, {'id': f['id'], 'name': f['name']})
-            curr_id = f['parent_id']
+            breadcrumbs.insert(0, {'id': f.id, 'name': f.name})
+            curr_id = f.parent_id
         else:
             break
-    db.close()
-    
+            
     return render_template('dashboard.html', docs=docs, folders=folders, current_folder_id=folder_id, breadcrumbs=breadcrumbs)
 
 @app.route('/upload', methods=['GET', 'POST'])
@@ -226,11 +194,9 @@ def upload():
             # Find drive folder id
             drive_folder_id = None
             if folder_id:
-                db = get_db()
-                folder = db.execute('SELECT drive_folder_id FROM folders WHERE id = ?', (folder_id,)).fetchone()
+                folder = Folder.query.get(folder_id)
                 if folder:
-                    drive_folder_id = folder['drive_folder_id']
-                db.close()
+                    drive_folder_id = folder.drive_folder_id
                 
             # Upload to Google Drive
             drive_file_id = drive_service.upload_file(unique_filename, encrypted_data, mime_type=mime_type, parent_id=drive_folder_id)
@@ -247,14 +213,19 @@ def upload():
             else:
                 file_type = 'file'
 
-            db = get_db()
-            cursor = db.execute('''
-                INSERT INTO documents (filename, original_name, name, description, file_type, upload_date, user_id, folder_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (drive_file_id, filename, name, description, file_type, 
-                  datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), current_user.id, folder_id))
-            db.commit()
-            db.close()
+            new_doc = Document(
+                filename=drive_file_id,
+                original_name=filename,
+                name=name,
+                description=description,
+                file_type=file_type,
+                upload_date=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                user_id=current_user.id,
+                folder_id=folder_id
+            )
+            db.session.add(new_doc)
+            db.session.commit()
+            
             return redirect(url_for('dashboard', folder_id=folder_id))
             
     return render_template('upload.html', folder_id=folder_id)
@@ -263,19 +234,17 @@ def upload():
 @login_required
 @admin_required
 def view_file(doc_id):
-    db = get_db()
-    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
-    db.close()
+    doc = Document.query.get(doc_id)
     if not doc:
         return "File not found", 404
     
     try:
-        encrypted_data = drive_service.download_file(doc['filename'])
+        encrypted_data = drive_service.download_file(doc.filename)
         if not encrypted_data:
             return "Error downloading file from Google Drive", 500
             
         decrypted_data = fernet.decrypt(encrypted_data)
-        mime_type, _ = mimetypes.guess_type(doc['original_name'])
+        mime_type, _ = mimetypes.guess_type(doc.original_name)
         
         return send_file(
             io.BytesIO(decrypted_data),
@@ -289,14 +258,12 @@ def view_file(doc_id):
 @login_required
 @admin_required
 def download(doc_id):
-    db = get_db()
-    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
-    db.close()
+    doc = Document.query.get(doc_id)
     if not doc:
         return "File not found", 404
     
     try:
-        encrypted_data = drive_service.download_file(doc['filename'])
+        encrypted_data = drive_service.download_file(doc.filename)
         if not encrypted_data:
             return "Error downloading file from Google Drive", 500
             
@@ -305,7 +272,7 @@ def download(doc_id):
         return send_file(
             io.BytesIO(decrypted_data),
             as_attachment=True,
-            download_name=doc['original_name']
+            download_name=doc.original_name
         )
     except Exception as e:
         app.logger.error(f"Error downloading file {doc_id}: {e}")
@@ -315,38 +282,40 @@ def download(doc_id):
 @login_required
 @admin_required
 def delete(doc_id):
-    db = get_db()
-    doc = db.execute('SELECT * FROM documents WHERE id = ?', (doc_id,)).fetchone()
+    doc = Document.query.get(doc_id)
     if not doc:
-        db.close()
         return "File not found", 404
     
-    success = drive_service.delete_file(doc['filename'])
+    success = drive_service.delete_file(doc.filename)
     if not success:
-        app.logger.warning(f"Failed to delete file {doc['filename']} from Google Drive")
+        app.logger.warning(f"Failed to delete file {doc.filename} from Google Drive")
     
-    db.execute('DELETE FROM documents WHERE id = ?', (doc_id,))
-    db.commit()
-    db.close()
+    db.session.delete(doc)
+    db.session.commit()
     return redirect(url_for('dashboard'))
 
-def recursive_delete_folder(db, folder_id):
-    # Delete subfolders
-    subfolders = db.execute('SELECT id FROM folders WHERE parent_id = ?', (folder_id,)).fetchall()
-    for sf in subfolders:
-        recursive_delete_folder(db, sf['id'])
+def recursive_delete_folder(folder_id):
+    # This logic can be simplified heavily using SQLAlchemy cascade='all, delete' 
+    # but since files are on Google Drive we still need to delete them explicitly
     
-    # Delete docs
-    docs = db.execute('SELECT id, filename FROM documents WHERE folder_id = ?', (folder_id,)).fetchall()
-    for doc in docs:
-        drive_service.delete_file(doc['filename'])
-        db.execute('DELETE FROM documents WHERE id = ?', (doc['id'],))
+    folder = Folder.query.get(folder_id)
+    if not folder:
+        return
         
-    # Delete folder from drive and db
-    f = db.execute('SELECT drive_folder_id FROM folders WHERE id = ?', (folder_id,)).fetchone()
-    if f and f['drive_folder_id']:
-        drive_service.delete_file(f['drive_folder_id'])
-    db.execute('DELETE FROM folders WHERE id = ?', (folder_id,))
+    # Delete docs from Drive
+    for doc in folder.documents:
+        drive_service.delete_file(doc.filename)
+        
+    # Recurse for subfolders
+    for subfolder in folder.subfolders:
+        recursive_delete_folder(subfolder.id)
+        
+    # Delete folder from drive
+    if folder.drive_folder_id:
+        drive_service.delete_file(folder.drive_folder_id)
+        
+    # SQLAlchemy will handle deleting child records locally because of cascade
+    db.session.delete(folder)
 
 @app.route('/create_folder', methods=['POST'])
 @login_required
@@ -360,22 +329,23 @@ def create_folder():
         parent_id = None
             
     if name:
-        db = get_db()
         drive_parent_id = None
         if parent_id:
-            parent_folder = db.execute('SELECT drive_folder_id FROM folders WHERE id = ?', (parent_id,)).fetchone()
+            parent_folder = Folder.query.get(parent_id)
             if parent_folder:
-                drive_parent_id = parent_folder['drive_folder_id']
+                drive_parent_id = parent_folder.drive_folder_id
                 
         drive_folder_id = drive_service.create_folder(name, drive_parent_id)
         
         if drive_folder_id:
-            db.execute('''
-                INSERT INTO folders (name, parent_id, drive_folder_id, user_id)
-                VALUES (?, ?, ?, ?)
-            ''', (name, parent_id, drive_folder_id, current_user.id))
-            db.commit()
-        db.close()
+            new_folder = Folder(
+                name=name,
+                parent_id=parent_id,
+                drive_folder_id=drive_folder_id,
+                user_id=current_user.id
+            )
+            db.session.add(new_folder)
+            db.session.commit()
         
     return redirect(url_for('dashboard', folder_id=parent_id))
 
@@ -385,33 +355,26 @@ def create_folder():
 def edit_folder(folder_id):
     name = request.form.get('name')
     if name:
-        db = get_db()
-        folder = db.execute('SELECT parent_id, drive_folder_id FROM folders WHERE id = ?', (folder_id,)).fetchone()
+        folder = Folder.query.get(folder_id)
         if folder:
-            if folder['drive_folder_id']:
-                drive_service.rename_file(folder['drive_folder_id'], name)
-            db.execute('UPDATE folders SET name = ? WHERE id = ?', (name, folder_id))
-            db.commit()
-        parent_id = folder['parent_id'] if folder else None
-        db.close()
-        return redirect(url_for('dashboard', folder_id=parent_id))
+            if folder.drive_folder_id:
+                drive_service.rename_file(folder.drive_folder_id, name)
+            folder.name = name
+            db.session.commit()
+            return redirect(url_for('dashboard', folder_id=folder.parent_id))
     return redirect(url_for('dashboard'))
 
 @app.route('/delete_folder/<int:folder_id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_folder(folder_id):
-    db = get_db()
-    folder = db.execute('SELECT parent_id FROM folders WHERE id = ?', (folder_id,)).fetchone()
-    parent_id = folder['parent_id'] if folder else None
-    
-    recursive_delete_folder(db, folder_id)
-    db.commit()
-    db.close()
-    
-    return redirect(url_for('dashboard', folder_id=parent_id))
-
-init_db()
+    folder = Folder.query.get(folder_id)
+    if folder:
+        parent_id = folder.parent_id
+        recursive_delete_folder(folder_id)
+        db.session.commit()
+        return redirect(url_for('dashboard', folder_id=parent_id))
+    return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
     app.run(debug=True)
