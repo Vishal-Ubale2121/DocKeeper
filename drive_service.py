@@ -11,7 +11,15 @@ from googleapiclient.errors import HttpError
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 FOLDER_NAME = "Memories-App"
 
+_cached_creds = None
+
 def get_drive_service():
+    global _cached_creds
+    
+    # Use cached credentials if they are still valid to prevent excessive refresh requests
+    if _cached_creds and _cached_creds.valid:
+        return build('drive', 'v3', credentials=_cached_creds)
+        
     creds = None
     token_path = os.path.join(os.path.dirname(__file__), 'token.json')
     creds_path = os.path.join(os.path.dirname(__file__), 'credentials.json')
@@ -47,6 +55,7 @@ def get_drive_service():
             with open(token_path, 'w') as token:
                 token.write(creds.to_json())
 
+    _cached_creds = creds
     return build('drive', 'v3', credentials=creds)
 
 def get_or_create_folder(service, folder_name, parent_id=None):
